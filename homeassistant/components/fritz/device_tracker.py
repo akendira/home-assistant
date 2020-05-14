@@ -1,97 +1,67 @@
 """Support for FRITZ!Box routers."""
-import logging
-
 from fritzconnection.lib.fritzhosts import FritzHosts
-import voluptuous as vol
 
-from homeassistant.components.device_tracker import (
-    DOMAIN,
-    PLATFORM_SCHEMA,
-    DeviceScanner,
-)
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
-import homeassistant.helpers.config_validation as cv
+from homeassistant.components.device_tracker.config_entry import ScannerEntity
+from homeassistant.components.device_tracker.const import SOURCE_TYPE_ROUTER
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
+from homeassistant.helpers.entity import Entity
 
-_LOGGER = logging.getLogger(__name__)
-
-CONF_DEFAULT_IP = "169.254.1.1"  # This IP is valid for all FRITZ!Box routers.
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    {
-        vol.Optional(CONF_HOST, default=CONF_DEFAULT_IP): cv.string,
-        vol.Optional(CONF_PASSWORD, default="admin"): cv.string,
-        vol.Optional(CONF_USERNAME, default=""): cv.string,
-    }
-)
+from .const import DOMAIN
 
 
-def get_scanner(hass, config):
-    """Validate the configuration and return FritzBoxScanner."""
-    scanner = FritzBoxScanner(config[DOMAIN])
-    return scanner if scanner.success_init else None
+async def async_setup_entry(hass, config_entry, async_add_entities):
+    """Set up device tracker for AVM FRITZ! component."""
+    connection = hass.data[DOMAIN]["connection"]
+    fritz = await self.hass.async_add_executor_job(FritzHosts, connection)
+    async_add_entities([FritzScanner(fritz)])
 
 
-class FritzBoxScanner(DeviceScanner):
-    """This class queries a FRITZ!Box router."""
+class FritzScanner(Entity):
+    self._fritz = None
 
-    def __init__(self, config):
-        """Initialize the scanner."""
-        self.last_results = []
-        self.host = config[CONF_HOST]
-        self.username = config[CONF_USERNAME]
-        self.password = config[CONF_PASSWORD]
-        self.success_init = True
+    def __init__(self, connection):
+        self._fritz = FritzHosts(fritz)
 
-        # Establish a connection to the FRITZ!Box.
-        try:
-            self.fritz_box = FritzHosts(
-                address=self.host, user=self.username, password=self.password
-            )
-        except (ValueError, TypeError):
-            self.fritz_box = None
+    async def async_update(self):
+        self.hass.data[DOMAIN]["hosts"] = await self.hass.async_add_executor_job(
+            self._fritz.get_hosts_info
+        )
 
-        # At this point it is difficult to tell if a connection is established.
-        # So just check for null objects.
-        if self.fritz_box is None or not self.fritz_box.modelname:
-            self.success_init = False
 
-        if self.success_init:
-            _LOGGER.info("Successfully connected to %s", self.fritz_box.modelname)
-            self._update_info()
-        else:
-            _LOGGER.error(
-                "Failed to establish connection to FRITZ!Box with IP: %s", self.host
-            )
+class FritzScannerEntity(ScannerEntity):
+    self._mac = None
+    self._info = None
 
-    def scan_devices(self):
-        """Scan for new devices and return a list of found device ids."""
-        self._update_info()
-        active_hosts = []
-        for known_host in self.last_results:
-            if known_host["status"] and known_host.get("mac"):
-                active_hosts.append(known_host["mac"])
-        return active_hosts
+    def __init__(self, mac):
+        self._mac = mac
 
-    def get_device_name(self, device):
-        """Return the name of the given device or None if is not known."""
-        ret = self.fritz_box.get_specific_host_entry(device).get("NewHostName")
-        if ret == {}:
-            return None
-        return ret
+    async def async_update(self):
+        self._info = self.hass.data[DOMAIN]["hosts"].get(self._mac, {})
 
-    def get_extra_attributes(self, device):
-        """Return the attributes (ip, mac) of the given device or None if is not known."""
-        ip_device = self.fritz_box.get_specific_host_entry(device).get("NewIPAddress")
+    @property
+    def is_connected(self):
+        """Return true if the device is connected to the network."""
+        return self._info.get("status") is not None
 
-        if not ip_device:
-            return {}
-        return {"ip": ip_device, "mac": device}
+    @property
+    def source_type(self):
+        """Return the source type of the device."""
+        return SOURCE_TYPE_ROUTER
 
-    def _update_info(self):
-        """Retrieve latest information from the FRITZ!Box."""
-        if not self.success_init:
-            return False
+    @property
+    def name(self) -> str:
+        """Return the name of the device."""
+        return self._info.get("name")
 
-        _LOGGER.debug("Scanning")
-        self.last_results = self.fritz_box.get_hosts_info()
-        return True
+    @property
+    def unique_id(self) -> str:
+        """Return a unique identifier for this device."""
+        return self._mac
+
+    @property
+    def device_info(self):
+        """Return a device description for device registry."""
+        return {
+            "connections": {(CONNECTION_NETWORK_MAC, self._mac)},
+            "name": self.name,
+        }
